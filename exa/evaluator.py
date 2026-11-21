@@ -4,6 +4,8 @@ v0.3 additions:
   - Dict/List indexing and slicing ($IN["hp"], $IN[0], $IN[1:3])
   - Ternary conditional expressions ('HIGH' if $IN > 50 else 'LOW')
   - Safe pure helper functions (len, int, str, float, bool, abs, round, min, max)
+  - Short-circuiting boolean 'and' / 'or' (operands after the deciding one
+    are never evaluated, so e.g. `false and $IN[0] == 1` is safe on [])
 """
 
 import ast
@@ -121,8 +123,27 @@ class SafeExprEvaluator:
                 raise ExaRuntimeError(f"Unsupported unary operator: {type(node.op).__name__}")
             return op_fn(cls._eval_node(node.operand, env))
         if isinstance(node, ast.BoolOp):
-            vals = [cls._eval_node(v, env) for v in node.values]
-            return all(vals) if isinstance(node.op, ast.And) else any(vals)
+            # Short-circuit evaluation with Python semantics (issue #1):
+            # 'and' returns the first falsy operand, or the last operand if
+            # every operand is truthy; 'or' returns the first truthy operand,
+            # or the last operand if every operand is falsy. Operands after
+            # the deciding one are NEVER evaluated, so a right-hand side that
+            # would raise (index error, division by zero, unknown name, ...)
+            # is safely skipped when the left-hand side already decides the
+            # result.
+            if isinstance(node.op, ast.And):
+                result = True
+                for value_node in node.values:
+                    result = cls._eval_node(value_node, env)
+                    if not result:
+                        return result
+                return result
+            result = False
+            for value_node in node.values:
+                result = cls._eval_node(value_node, env)
+                if result:
+                    return result
+            return result
         if isinstance(node, ast.Compare):
             left = cls._eval_node(node.left, env)
             for op, right_node in zip(node.ops, node.comparators):
