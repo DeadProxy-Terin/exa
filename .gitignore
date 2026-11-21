@@ -1,0 +1,23 @@
+# Python bytecode & caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments & editor settings
+.venv/
+venv/
+.vscode/
+.idea/
+
+# Build & packaging artifacts
+build/
+dist/
+*.egg-info/
+
+# Runtime test artifacts & local snapshots
+stress_io.txt
+stress_snap.json
+hymn_state.json
+
+# Legacy prototype backups moved out of root
+_archive/

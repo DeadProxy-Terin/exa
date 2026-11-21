@@ -1,0 +1,154 @@
+# Exa Programming Language — Technical Handoff & Context Document (v0.3)
+
+> **Catatan untuk AI / Assistant di Chat Baru:**
+> Dokumen ini berisi spesifikasi lengkap, arsitektur kode, status pengujian, preferensi kreator, dan roadmap pengembangan **Exa** (`.exa`). User akan melampirkan file-file Python proyek ini. Gunakan dokumen ini sebagai referensi utama agar tidak mengulang desain dari awal.
+
+---
+
+## 1. Identitas Proyek & Preferensi Kreator
+* **Nama Bahasa:** **Exa** (ekstensi file: `.exa`, package Python: `exa/`, fungsi entrypoint: `run_exa`).
+* **Inspirasi:** Tata bahasa & konsep *Song Magic* dari seri game **Ar tonelico / EXA_PICO / Ar nosurge** (`.METHOD`, `EXEC`, `/.`, `includes.Ex_`, `EXEC_with`, `over`, `REPLEKIA`, `HIBERNATION`, `PURGER`, `SUSPEND`, `RE=NATION`, `DIVE`, `GRATHMELD`, `INSTALL`, `FLIP`, `chmod b...`, `#HYMN_CODE`, `Class::... extends...`) dipadukan dengan desain bahasa *task-runner & lazy data pipeline* (`>>`, `<<`, `>`, `$IN`).
+* **Status Implementation Language:** Saat ini ditulis menggunakan **Python 3** (sebagai *host language* untuk prototyping cepat). Exa **bukan** dialek Python; sintaks dan model eksekusinya independen.
+* **Preferensi Kerja User:**
+  * Diskusi/penjelasan menggunakan **Bahasa Indonesia** yang jelas dan santai.
+  * Seluruh kode Python, komentar, *docstring*, dan pesan *error* harus menggunakan **Bahasa Inggris yang rapi & profesional** (target: open-source GitHub).
+  * Saat memberikan update kode, berikan **secara bertahap** (maksimal 1 file panjang atau 2 file pendek per pesan) dalam **isi file utuh (Ctrl+A -> Paste)** agar tidak terjadi error *partial replace* atau terpotong.
+
+---
+
+## 2. Struktur Direktori Proyek Saat Ini (v0.3)
+```text
+Desktop\hymnscript\             (folder kerja saat ini; bisa direname ke Desktop\exa\)
+├── exa\                        (Python package inti — sudah v0.3)
+│   ├── __init__.py             (export run_exa, Lexer, Parser, Runtime, Interpreter, Exceptions)
+│   ├── errors.py               (ExaError, LexerError, ParserError, ExaRuntimeError, PermissionDeniedError, MethodSuspendedError, SkipItem)
+│   ├── ast_nodes.py            (Token, ASTNode dataclasses)
+│   ├── lexer.py                (Tokenizer termasuk dukungan '-' di #HYMN_CODE)
+│   ├── evaluator.py            (SafeExprEvaluator berbasis Python ast: math, bool, subscript, slice, ternary, safe funcs)
+│   ├── parser.py               (Recursive-descent parser: composite .METHOD, grouped pipeline '>>', Class::, EXEC_with, DIVE)
+│   ├── runtime.py              (Thread-safe Runtime: 32 built-ins di self.builtins + 5 std_modules)
+│   └── interpreter.py          (Lazy-generator pipeline engine + ThreadPoolExecutor untuk EXEC_with & REPLEKIA)
+├── run.py                      (CLI runner: python run.py [file.exa] [--ast]; banner demo-nya masih bertuliskan v0.2)
+├── test_v03.py                 (7 automated unittest regression tests — semua lulus!)
+├── test.exa                    (skrip uji dasar)
+├── ping.exa                    (skrip uji net.ping Windows)
+├── stress_core.exa             (stress test 5 task besar mencakup stream 5000 item & semua fitur non-interaktif)
+└── stress_interactive.exa      (uji LISTEN, ANSUL admin chmod, net.ping, net.http_get, b000000000)
+```
+
+---
+
+## 3. Arsitektur & Cara Kerja Internal
+
+Alur eksekusi:
+`Source (.exa)` $\rightarrow$ `Lexer.tokenize()` $\rightarrow$ `Parser.parse()` (`ProgramNode` AST) $\rightarrow$ `Interpreter.run()` + `Runtime`
+
+### A. Pipeline Engine (`StreamPacket` & Lazy Generators di `interpreter.py`)
+1. Setiap stage dalam `EXEC` menghasilkan `StreamPacket(gen, is_single_value)`.
+2. **Deteksi Dinamis `is_single_value`:**
+   * Jika sebuah stage (dan hulunya) bukan loop (`doloop`/`REPLEKIA`) dan tidak mengembalikan Python `Generator` (seperti `CALC("10 + 10")` atau `STREAM(..., "read_all")`), `is_single_value` bernilai `True`.
+   * Jika mengembalikan `Generator` (seperti `SEQ` atau `STREAM(..., "read")`), `packet.is_single_value` otomatis berubah menjadi `False` saat item mulai ditarik, dan stage perantara (seperti `FILTER` atau `CALC`) mempropagasikan `if not upstream.is_single_value: packet.is_single_value = False`.
+   * **Efeknya pada `doloop.C:N` / `doloop.UT` / `doloop.WHILE` di hilir:**
+     * Jika hulu `is_single_value == True` (nilai tunggal statis, misal `(.METHOD_HITUNG) >> (.METHOD_CETAK << doloop.C:3)/.`), nilai tunggal itu di-*cache* dan diumpankan ulang sebanyak `N` kali.
+     * Jika hulu `is_single_value == False` (true stream seperti `SEQ` atau `doloop.UTE`), hilir menarik maksimal `N` item lalu memanggil `upstream.gen.close()`, sehingga *infinite stream* `doloop.UTE` di hulu berhenti bersih tanpa *deadlock* atau *race condition*.
+3. **Aggregator (`STREAM_AGGREGATORS`):** `SUM`, `MIN`, `MAX`, `LEN`, `SORT`, `CHECK`, `SLICE` mengumpulkan seluruh stream hulu (`list(upstream.gen)`), lalu mengubahnya kembali menjadi `is_single_value = True` (karena mereduksi stream menjadi 1 hasil).
+4. **Smart `$IN` Injection (`_invoke_tool`):**
+   * Jika stage hilir tidak menulis `> (...)`, argumen otomatis diisi `[$IN]` (khusus fungsi yang menerima argumen posisional lewat pemeriksaan `inspect.signature`; fungsi 0-argumen seperti `time.now` dipanggil tanpa argumen).
+   * Jika stage hilir memberi argumen opsi tanpa menyebut variabel `$IN` eksplisit:
+     * `STREAM_AGGREGATORS` (`SORT`, `SLICE`, `CHECK`, dll.) otomatis me-prepend `$IN` (kecuali argumen pertama berupa `ListNode`).
+     * `AUTO_PREPEND_IN_TOOLS` (`FLIP`, `CODEC`, `HASH`, `ROUND`, `FORMAT`, `GRATHMELD`) otomatis me-prepend `$IN` bila diberi 1 argumen opsi (misal `>> (FORMAT) > ("upper")`, `>> (GRATHMELD) > ([3, 4])`).
+     * `STORE` dengan 1 argumen (`>> (STORE) > ("key")`) otomatis menyisipkan `$IN` sebagai *value* argumen kedua.
+5. **Tee-Style Output Pass-Through:** `EMIT`, `console.log`, `console.warn`, `console.error` ketika berada di tengah/hilir pipa (`has_upstream == True`) mencetak output lalu tetap meneruskan `$IN` ke stage berikutnya.
+6. **Thread-Safety:** `Runtime` memakai `_io_lock` (mencegah teks terminal bertabrakan) dan `_state_lock = threading.RLock()` (melindungi `methods`, `classes`, `permissions`, `suspended`, `plugins`, `memory_vars` saat `EXEC_with` atau `REPLEKIA` berjalan). Anonymous `.METHOD` hanya dibersihkan di `finally:` milik `_exec_node()` setelah seluruh *thread* selesai.
+
+---
+
+## 4. Spesifikasi Sintaks & Fitur Bahasa (v0.3)
+
+### Header, Komentar & Modul
+* Komentar: `// baris` dan `/* blok */`.
+* Terminator baris perintah: `/.` (kecuali blok `Class::... { ... };` yang ditutup `;`).
+* Header identitas & hak akses: `#HYMN_CODE: USER_RANK_SERVER/.` (mendukung tanda hubung `-`, misal `SHURELIA_ANSUL_TOWER-01`). Rank `ANSUL` bertindak sebagai Administrator/root.
+* Import modul standar: `Include math/.` atau gaya Ar tonelico `includes.Ex_console/.` (awalan `Ex_` otomatis dilepas).
+
+### Method & Class (OOP)
+* `.METHOD = (TOOL) > (args)/.` — Slot anonim sementara; otomatis terhapus setelah satu kali `EXEC` selesai.
+* `.METHOD_NAME = (TOOL) > (args)/.` — Method bernama yang tersimpan di memori.
+* **Composite Method:** `.METHOD_CLEAN_SUM = (FILTER) > ("$IN > 0") >> (SUM)/.` — Membungkus pipeline multi-stage ke dalam satu `.METHOD_`.
+* **Class (Ar nosurge style):**
+  ```text
+  Class::BASE {
+      .METHOD_HI = (EMIT) > ("Hello", $IN)/.
+  };
+  Class::SUB extends.BASE {
+      .METHOD_CALC = (CALC) > ("$IN * 2")/.
+  };
+  EXEC = (SUB.CALC) > (5) >> (SUB.HI)/.
+  ```
+  Method class bisa dijadikan target `chmod`, `SUSPEND`, `RE=NATION`, `INSTALL`, `DIVE`, dan ikut tersimpan di `HIBERNATION` (dengan kunci kanonik `ClassName::.METHOD_NAME` atau argumen `ClassName.ShortName`).
+
+### Eksekusi, Pipa, Loop & Error Handling
+* `EXEC = <stage1> >> <stage2> [over (.FALLBACK)]/.` — Eksekusi linear/pipa (`>>`). Mendukung *grouped pipeline* bersambung, misal `((SEQ) > (1, 3) >> (SUM)) >> (EMIT)/.`.
+* `EXEC_with = (<pipeline1>) & (<pipeline2>) [over (.FALLBACK)]/.` — Eksekusi paralel via `ThreadPoolExecutor`.
+* `DIVE = <pipeline>/.` — Menjalankan pipeline dalam mode sandbox *step-by-step trace* (`[DIVE Stage X | ...] $IN=... -> OUT=...`).
+* `over (.FALLBACK)` — Menangkap `ExaRuntimeError` (termasuk `PermissionDeniedError` dan `MethodSuspendedError`) dan menjalankan `.FALLBACK` dengan `$ERR` berisi pesan error.
+* **Loop & Worker Controllers (`<<`):**
+  * `doloop.C:<n>` — Ulangi/ambil tepat `n` kali.
+  * `doloop.UT` / `doloop.UTE` — *Infinite loop* hingga dihentikan hilir (`UTE` berhenti otomatis saat pipa hilir selesai).
+  * `doloop.WHILE:"<cond>"` — Loop selama kondisi benar (pada stage akar tanpa hulu yang memakai `$IN`, kandidat dijalankan dulu sebelum cek kondisi agar tidak `NoneType` error).
+  * `REPLEKIA:<n>` — Jalankan eksekusi secara paralel di `n` *worker threads*.
+
+### Variabel Runtime & Ekspresi (`SafeExprEvaluator`)
+* Variabel bawaan: `$IN` (input pipa saat ini), `$STEP` (nomor iterasi mulai dari `1`), `$ERR` (pesan error pada `over`). Interpolasi `$IN`/`$STEP`/`$ERR` bekerja di string maupun rekursif di dalam `List`/`Dict`.
+* Di dalam `CALC`, `FILTER`, `CHECK`, `BRANCH`, dan `doloop.WHILE`: mendukung operasi aritmatika, boolean (`and`/`or`/`not`), perbandingan (`in`/`not in`), subscript/slicing (`$IN['hp']`, `$IN[0]`, `$IN[1:3]`), ternary (`'A' if $IN > 5 else 'B'`), dan fungsi aman (`len`, `int`, `str`, `float`, `bool`, `abs`, `round`, `min`, `max`).
+
+### Daftar Lengkap Built-ins (32 di `self.builtins` + 3 Kontrol) & 5 Standard Modules
+1. **Konversi & Format:** `FLIP`, `CODEC`, `FORMAT`
+2. **I/O Dasar:** `EMIT`, `LISTEN`, `STREAM` (`read`, `read_all`, `write`, `append`)
+3. **Matematika & Deret:** `CALC`, `ABS`, `ROUND`, `SUM`, `MIN`, `MAX`, `SEQ`
+4. **Koleksi & Stream:** `LEN`, `FILTER`, `SORT`, `SLICE`, `CHECK`, `GRATHMELD`
+5. **Inspeksi, Keamanan & Meta:** `TYPE`, `HASH`, `DIVE`, `INSTALL` (middleware `retry`, `delay`, `prefix`), `LORE`, `chmod` (`"b111000000"`, `b000000000` kunci total)
+6. **Lifecycle, Memori & Routing:** `SUSPEND`, `RE=NATION`, `HIBERNATION` (`save`/`load` JSON penuh), `PURGER`, `STORE`, `RECALL`, `BRANCH` (nilai atau eksekusi `.METHOD` / `Class.Method`)
+7. **Kontrol Bahasa:** `doloop`, `REPLEKIA`, `EXEC_with`/`over`
+8. **Standard Modules (`Include`):**
+   * `math`: `count`, `sqrt`, `pow`, `sin`, `cos`, `pi`, `random`
+   * `console`: `log`, `warn`, `error`, `clear`
+   * `sys`: `chmod`, `info`, `hymn_code`, `env`, `sleep`
+   * `net`: `request_access`, `ping` (real OS `ping` Windows `-n` / Unix `-c`), `http_get`
+   * `time`: `now`, `timestamp`, `sleep`
+
+---
+
+## 5. Cara Menjalankan & Status Tes Terakhir
+Perintah yang sudah diuji dan **100% lulus di Windows 11 (Python 3.12.0)**:
+```powershell
+python test_v03.py              # Ran 7 tests in 0.027s - OK
+python run.py stress_core.exa   # Lulus Task 1-5 (5000-item stream, REPLEKIA:8, Class::, HIBERNATION, dll.)
+python run.py                   # Lulus Demo bawaan
+python run.py --ast test.exa    # Dump AST + eksekusi
+```
+
+---
+
+## 6. Roadmap Pengembangan Selanjutnya (Langkah A dan B)
+
+Prioritas fitur berikutnya yang sudah direncanakan bersama user:
+
+### Langkah A — 2 Pintu Ekstensi (Plugin & Library Loader)
+**Tujuan:** Agar user maupun developer luar dapat membuat *tools/library* baru untuk **Exa** tanpa perlu memodifikasi file internal di dalam `exa/`.
+1. **Programmatic Plugin API di `Runtime`:**
+   * Tambahkan `rt.register_tool(name, fn)` dan `rt.register_module(module_name, functions_dict)` (dengan `_state_lock`).
+2. **Pintu 1 — Dynamic `Include` untuk File `.exa` Lokal (Pure Exa Libraries):**
+   * Jika `Include nama/.` (atau `Include "path/file.exa"/.`) bukan merupakan `std_modules` bawaan, cari `./<nama>.exa` atau `./libs/<nama>.exa` (atau path literal).
+   * Lex, parse, dan eksekusi file library tersebut ke dalam `Runtime` yang sama (mendaftarkan `.METHOD_...` dan `Class::...` dari file library tersebut), lengkap dengan set `loaded_files` untuk mencegah *circular include*!
+   * *(Catatan Parser: `_parse_include()` di `parser.py` perlu mendukung `STRING` selain `IDENT` untuk `Include "libs/utils.exa"/.*).*
+3. **Pintu 2 — Auto-Loader Folder `plugins/*.py` (Native Python Extensions):**
+   * Jika `Include nama/.` tidak ada di `std_modules` dan bukan `.exa`, cari `./plugins/<nama>.py` menggunakan `importlib.util.spec_from_file_location`.
+   * Jika modul Python tersebut mendefinisikan `EXA_MODULE: dict` atau fungsi `register(runtime)`, muat dan daftarkan otomatis ke `self.std_modules` / `self.included_modules`.
+
+### Langkah B — Mode REPL Interaktif (`--repl`)
+**Tujuan:** Menambahkan konsol interaktif live lewat `python run.py --repl` (atau `exa --repl` setelah di-build).
+* Pertahankan satu instance `Runtime` dan `Interpreter` selama sesi REPL berlangsung agar `.METHOD_...`, `Class::`, `Include`, dan `STORE` tetap tersimpan antar-perintah.
+* **Dukungan Multi-Baris:** Jika input belum diakhiri `/.` (atau `};` untuk `Class::`), terus minta baris lanjutan dengan prompt `... >` sampai blok selesai.
+* **Meta-Command REPL:** `:help`, `:methods`, `:classes`, `:vars` (`memory_vars`), `:modules`, `:clear`, `:exit` / `:quit`.
+* **Error Recovery:** Tangkap `ExaError` (LexerError, ParserError, ExaRuntimeError) dan tampilkan pesan rapi tanpa membuat REPL keluar/crash.

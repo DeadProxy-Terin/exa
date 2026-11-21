@@ -1,0 +1,23 @@
+#HYMN_CODE: REYVATEIL_ANSUL_TOWER01/.
+
+Include net/.
+Include console/.
+Include sys/.
+
+// 1. ANSUL admin override on chmod b110000000 + live ping
+.METHOD_ADMIN_PING = (net.ping) > ("8.8.8.8")/.
+.METHOD_LOCKED_ERR = (console.warn) > ("Ping / Akses Ditolak -> $ERR")/.
+EXEC = (chmod) > ("b110000000", .METHOD_ADMIN_PING)/.
+EXEC = (.METHOD_ADMIN_PING << doloop.C:2) >> (console.log) > ("Admin Ping #$STEP ->", $IN) over (.METHOD_LOCKED_ERR)/.
+
+// 2. Interactive LISTEN -> FORMAT -> EMIT
+.METHOD_USER_INPUT = (LISTEN) > ("Masukkan nama Reyvateil favoritmu: ")/.
+EXEC = (.METHOD_USER_INPUT) >> (FORMAT) > ($IN, "trim") >> (FORMAT) > ($IN, "upper") >> (EMIT) > ("Selamat datang,", $IN)/.
+
+// 3. Live HTTP GET + SLICE preview
+.METHOD_WEB = (net.http_get) > ("https://example.com")/.
+EXEC = (.METHOD_WEB) >> (SLICE) > ($IN, 0, 120) >> (EMIT) > ("HTTP Preview:", $IN) over (.METHOD_LOCKED_ERR)/.
+
+// 4. Absolute lock b000000000 (locked even for ANSUL)
+EXEC = (chmod) > ("b000000000", .METHOD_ADMIN_PING)/.
+EXEC = (.METHOD_ADMIN_PING) over (.METHOD_LOCKED_ERR)/.

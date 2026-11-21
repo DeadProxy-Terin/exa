@@ -1,0 +1,8 @@
+Include net/.
+Include console/.
+
+.METHOD_PING   = (net.ping) > ("8.8.8.8")/.
+.METHOD_OUTPUT = (console.log) > ("Ping #$STEP ->", $IN)/.
+.METHOD_BACKUP = (console.warn) > ("Koneksi gagal -> $ERR")/.
+
+EXEC = (.METHOD_PING << doloop.UTE) >> (.METHOD_OUTPUT << doloop.C:3) over (.METHOD_BACKUP)/.

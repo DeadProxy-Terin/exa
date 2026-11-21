@@ -1,0 +1,4 @@
+Include math/.
+.METHOD_HITUNG = (CALC) > ("10 + 10")/.
+.METHOD_CETAK  = (EMIT) > ($IN)/.
+EXEC = (.METHOD_HITUNG) >> (.METHOD_CETAK << doloop.C:3)/.
