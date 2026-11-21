@@ -25,6 +25,7 @@ from exa import (
     Runtime,
     run_exa,
 )
+from exa.evaluator import SafeExprEvaluator
 
 
 class TestExaV04(unittest.TestCase):
@@ -32,6 +33,23 @@ class TestExaV04(unittest.TestCase):
         outputs = []
         rt = run_exa(src, output_fn=outputs.append, base_dir=base_dir)
         return outputs, rt
+
+    def test_boolean_operators_short_circuit(self):
+        # 'and' must not evaluate a later operand that would raise once an
+        # earlier operand is false, and 'or' must stop at the first true one.
+        self.assertIs(
+            SafeExprEvaluator.evaluate("len($IN) > 0 and $IN[0] == 1", {"$IN": []}),
+            False,
+        )
+        self.assertIs(
+            SafeExprEvaluator.evaluate("len($IN) == 0 or $IN[0] == 1", {"$IN": []}),
+            True,
+        )
+        # Still evaluates all operands when nothing short-circuits.
+        self.assertIs(
+            SafeExprEvaluator.evaluate("len($IN) > 0 and $IN[0] == 1", {"$IN": [1]}),
+            True,
+        )
 
     def test_stream_read_error_recovery_and_deterministic_close(self):
         with tempfile.TemporaryDirectory() as tmpdir:

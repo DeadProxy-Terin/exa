@@ -121,8 +121,18 @@ class SafeExprEvaluator:
                 raise ExaRuntimeError(f"Unsupported unary operator: {type(node.op).__name__}")
             return op_fn(cls._eval_node(node.operand, env))
         if isinstance(node, ast.BoolOp):
-            vals = [cls._eval_node(v, env) for v in node.values]
-            return all(vals) if isinstance(node.op, ast.And) else any(vals)
+            # Short-circuit like Python: and stops at the first false value and
+            # or at the first true one, so later operands that would raise
+            # (for example $IN[0] on an empty list) are never evaluated.
+            if isinstance(node.op, ast.And):
+                for v in node.values:
+                    if not cls._eval_node(v, env):
+                        return False
+                return True
+            for v in node.values:
+                if cls._eval_node(v, env):
+                    return True
+            return False
         if isinstance(node, ast.Compare):
             left = cls._eval_node(node.left, env)
             for op, right_node in zip(node.ops, node.comparators):
